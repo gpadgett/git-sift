@@ -1,0 +1,189 @@
+#!/bin/bash -eu
+
+# git-sift
+#
+# A small program to easily sift file changes into one of many commits on a local branch.
+#
+# TODO:
+# - Support deletion and rename
+
+
+# Check environment
+remote="$(git for-each-ref --format='%(upstream:short)' $(git symbolic-ref -q HEAD))"
+if [ -z "$remote" ]; then
+    echo 'ERROR: local branch not tracking an upstream; set with `git branch -u <remote/branch>`'
+    exit 1
+fi
+git status -s
+echo
+
+# Operation mode
+mode=manual
+dryRun=
+for arg in $@; do
+    case "$arg" in
+    "-a"|"--auto")
+        mode=auto
+        ;;
+    "-n"|"--dry-run")
+        dryRun="--dry-run"
+        ;;
+    esac
+done
+
+if [ -n "$dryRun" ]; then
+    echo -e "Not committing changes\n"
+fi
+
+needSquash=0
+
+# Look for renamed files; we don't yet handle them
+function checkRenames() {
+    if $(git status -s | grep -q ' -> '); then
+        echo "Renames not supported, please resolve manually"
+        exit 1
+    fi
+}
+
+# Check index and offer to commit any staged changes
+function checkIndex() {
+    files="$(git status -s | grep '^[^ \?]. ' | cut -c4-)"
+    if [ -n "$files" ]; then
+        echo "Staged files:"
+        echo "$files" | sed 's/^/  /'
+        echo
+
+        # TODO No "$files" arg; already staged
+        chooseCommit "$files"
+    fi
+}
+
+function autoSift() {
+    echo "Placing files in the following commits:"
+    echo
+    found=0
+    for f in $(git status -s | grep '^ [M]' | cut -c4-); do
+        found=1
+        commit="$(git log --oneline -n1 @{u}.. $f)"
+        if [ -n "$commit" ]; then
+            echo -e "$(git log --oneline -n1 @{u}.. $f)\n  $f"
+        else
+            echo -e "(skip)\n  $f"
+        fi
+    done
+
+    if [ "$found" -eq 0 ]; then
+        echo "(No unstaged changes)"
+        return
+    fi
+
+    read -p "Continue? [Y|n] "
+    if ! [[ $REPLY =~ ^$|[Yy].* ]]; then
+        exit
+    fi
+    echo
+
+    for f in $(git status -s | grep '^ [M]' | cut -c4-); do
+        commit="$(git log --oneline -n1 @{u}.. $f)"
+        if [ -n "$commit" ]; then
+            git commit $dryRun --fixup=$(echo "$commit" | awk '{print $1}') "$f"
+            needSquash=1
+        fi
+    done
+}
+
+function manualSift() {
+    # reverse order keeps selection numbers constant if new commits are added
+    for f in $(git status -s | grep '^ [M]' | cut -c4-); do
+        chooseCommit "$f"
+    done
+}
+
+function checkSquash() {
+    if [ "$needSquash" -eq 0 ]; then
+        return
+    fi
+
+    echo
+    read -p "Autosquash? [Y|n] "
+    if [[ $REPLY =~ ^$|[Yy].* ]]; then
+        stashed=0
+        if $(git status -s | grep -vq '^?? '); then
+            read -p "Files are staged; stash them? [Y|n] "
+            if [[ $REPLY =~ ^$|[Yy].* ]]; then
+                git stash
+                stashed=1
+                echo
+            fi
+        fi
+
+        GIT_EDITOR=: git rebase -i --autosquash @{u}
+
+        if [ "$stashed" -eq 1 ]; then
+            echo
+            git stash pop
+            echo "Stash poppped"
+        fi
+    fi
+}
+
+function chooseCommit() {
+    files="$1"
+
+    # If there's one file, a local commit containing it will be the default choice
+    fileCommits=
+    if [ -n "$files" ] && [ $(echo "$files" | wc -l) -eq 1 ]; then
+        fileCommits="$(git log --oneline @{u}.. $files | awk '{print $1}')"
+    fi
+
+    commits="$(git log --oneline --reverse @{u}..)"
+    while /bin/true; do
+        i=1
+        default="s"
+        echo "$files"
+        while read -r commit; do
+            sha="$(echo "$commit" | awk '{print $1}')"
+            # if the file in question exists in a prior commit on this branch...
+            if $(echo "$fileCommits" | grep -q $sha); then
+                echo "$i * $commit"
+                default=$i
+            else
+                echo "$i - $commit"
+            fi
+            i=$(($i +1))
+        done <<< "$commits"
+        echo "n - new commit"
+        echo "s - skip"
+
+        read -p "Enter selection [$default]: " ans
+        [ -z "$ans" ] && ans=$default
+
+        echo
+        if [ "$ans" = "s" ]; then
+            echo "Skipping $files"
+        elif [ "$ans" = "n" ]; then
+            read -p "Enter commit subject: " msg
+            git commit $dryRun -m "$msg" $files
+            needSquash=1
+        elif [ "$ans" -ge 1 ] && [ "$ans" -le "$i" ]; then
+            commit="$(echo "$commits" | awk 'NR=='$ans' {print $1; exit}')"
+            git commit $dryRun --fixup=$commit $files
+            needSquash=1
+        else
+            echo "Invalid selection..."
+            echo
+            continue
+        fi
+        echo
+        break
+    done
+}
+
+checkRenames
+checkIndex
+if [ "$mode" = "auto" ]; then
+    autoSift
+else
+    manualSift
+fi
+checkSquash
