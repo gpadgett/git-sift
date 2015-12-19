@@ -152,19 +152,20 @@ function chooseCommit() {
             fi
             i=$(($i +1))
         done <<< "$commits"
-        echo "n - new commit"
-        echo "s - skip"
+        echo "n - New commit"
+        echo "s - Skip"
 
         read -p "Enter selection [$default]: " ans
         [ -z "$ans" ] && ans=$default
+        ans="$(echo $ans | tr '[:upper:]' '[:lower:]')"
 
         echo
-        if [ "$ans" = "s" ]; then
-            echo "Skipping $files"
-        elif [ "$ans" = "n" ]; then
+        if [ "$ans" = "n" ]; then
             read -p "Enter commit subject: " msg
             git commit $dryRun -m "$msg" $files
             needSquash=1
+        elif [ "$ans" = "s" ]; then
+            echo "Skipping $files"
         elif [ "$ans" -ge 1 ] && [ "$ans" -le "$i" ]; then
             commit="$(echo "$commits" | awk 'NR=='$ans' {print $1; exit}')"
             git commit $dryRun --fixup=$commit $files
