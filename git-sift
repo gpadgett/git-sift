@@ -47,17 +47,17 @@ function checkRenames() {
 
 # Check index and offer to commit any staged changes
 function checkIndex() {
-    files="$(git status -s | grep '^[^ \?]. ' | cut -c4-)"
+    files="$(git diff-index --name-only --cached HEAD)"
     if [ -n "$files" ]; then
         echo "Staged files:"
         echo "$files" | sed 's/^/  /'
         echo
 
-        # TODO No "$files" arg; already staged
         chooseCommit "$files"
     fi
 }
 
+# Choose the most recent commit to have modified each file
 function autoSift() {
     echo "Placing files in the following commits:"
     echo
@@ -92,6 +92,7 @@ function autoSift() {
     done
 }
 
+# For each file, let the user choose the commit
 function manualSift() {
     # reverse order keeps selection numbers constant if new commits are added
     for f in $(git status -s | grep '^ [M]' | cut -c4-); do
@@ -99,6 +100,7 @@ function manualSift() {
     done
 }
 
+# If changes were made, offer to `rebase --autosquash` the commits
 function checkSquash() {
     if [ "$needSquash" -eq 0 ]; then
         return
@@ -108,7 +110,7 @@ function checkSquash() {
     read -p "Autosquash? [Y|n] "
     if [[ $REPLY =~ ^$|[Yy].* ]]; then
         stashed=0
-        if $(git status -s | grep -vq '^?? '); then
+        if [ -n "$(git diff-index HEAD)" ]; then
             read -p "Files are staged; stash them? [Y|n] "
             if [[ $REPLY =~ ^$|[Yy].* ]]; then
                 git stash
@@ -127,55 +129,93 @@ function checkSquash() {
     fi
 }
 
+# Display a menu allowing a commit to be chosen and other misc operations
 function chooseCommit() {
     files="$1"
 
     # If there's one file, a local commit containing it will be the default choice
+    firstCommit=
     fileCommits=
     if [ -n "$files" ] && [ $(echo "$files" | wc -l) -eq 1 ]; then
+        firstCommit="$(git log --oneline -n1 @{u}.. $files | awk '{print $1}')"
         fileCommits="$(git log --oneline @{u}.. $files | awk '{print $1}')"
     fi
 
-    commits="$(git log --oneline --reverse @{u}..)"
     while /bin/true; do
+        commits="$(git log --oneline --reverse @{u}..)"
+        staged="$(git diff-index --cached --name-only HEAD)"
         i=1
         default="s"
-        echo "$files"
+
+        if [ -n "$staged" ]; then
+            echo "(Staged)"
+            echo "$staged"
+        else
+            echo "$files"
+        fi
+
         while read -r commit; do
             sha="$(echo "$commit" | awk '{print $1}')"
             # if the file in question exists in a prior commit on this branch...
-            if $(echo "$fileCommits" | grep -q $sha); then
-                echo "$i * $commit"
+            sep="-"
+            if [ "$sha" = "$firstCommit" ]; then
+                sep="*"
                 default=$i
-            else
-                echo "$i - $commit"
+            elif $(echo "$fileCommits" | grep -q $sha); then
+                sep="+"
             fi
+            echo "$i $sep $commit"
             i=$(($i +1))
         done <<< "$commits"
+
         echo "n - New commit"
-        echo "s - Skip"
+        echo "p - Partial commit (select new chunks using \`git add --patch)\`"
+        if [ -z "$staged" ]; then
+            echo "s - Skip file(s)"
+        fi
+        echo "v - View changes (staged and unstaged)"
 
         read -p "Enter selection [$default]: " ans
+        echo
         [ -z "$ans" ] && ans=$default
         ans="$(echo $ans | tr '[:upper:]' '[:lower:]')"
 
-        echo
         if [ "$ans" = "n" ]; then
             read -p "Enter commit subject: " msg
-            git commit $dryRun -m "$msg" $files
+            if [ -z "$staged" ]; then
+                git add $files
+            fi
+            git commit $dryRun -m "$msg"
+        elif [ "$ans" = "p" ]; then
+            git add --patch $files
         elif [ "$ans" = "s" ]; then
-            echo "Skipping $files"
+            if [ -n "$staged" ]; then
+                echo "Cannot skip staged changes..."
+            else
+                echo "Skipping..."
+                break
+            fi
+        elif [ "$ans" = "v" ]; then
+            if [ -n "$staged" ]; then
+                git diff --cached | less
+            fi
+            git diff $files | less
         elif [ "$ans" -ge 1 ] && [ "$ans" -le "$i" ]; then
             commit="$(echo "$commits" | awk 'NR=='$ans' {print $1; exit}')"
-            git commit $dryRun --fixup=$commit $files
+            if [ -z "$staged" ]; then
+                git add $files
+            fi
+            git commit $dryRun --fixup=$commit
             needSquash=1
         else
             echo "Invalid selection..."
-            echo
-            continue
+        fi
+
+        staged="$(git diff-index --cached --name-only HEAD)"
+        if [ -z "$staged" ] && $(git diff --quiet $files); then
+            break  # No more changes
         fi
         echo
-        break
     done
 }
 
