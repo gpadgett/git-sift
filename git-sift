@@ -182,6 +182,7 @@ function chooseCommit() {
 
         if [ "$ans" = "n" ]; then
             read -p "Enter commit subject: " msg
+            echo
             if [ -z "$staged" ]; then
                 git add $files
             fi
@@ -193,6 +194,7 @@ function chooseCommit() {
                 echo "Cannot skip staged changes..."
             else
                 echo "Skipping..."
+                echo
                 break
             fi
         elif [ "$ans" = "v" ]; then
@@ -211,11 +213,11 @@ function chooseCommit() {
             echo "Invalid selection..."
         fi
 
+        echo
         staged="$(git diff-index --cached --name-only HEAD)"
         if [ -z "$staged" ] && $(git diff --quiet $files); then
             break  # No more changes
         fi
-        echo
     done
 }
 
